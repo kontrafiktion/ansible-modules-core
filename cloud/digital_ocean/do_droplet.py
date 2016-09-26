@@ -44,15 +44,15 @@ options:
        name. Setting this to "yes" allows only one host per name.  Useful for idempotence.
     default: "no"
     choices: [ "yes", "no" ]
-  size_id:
+  size:
     description:
-     - This is the slug of the size you would like the droplet created with.
-  image_id:
+     - This is the size you would like the droplet created with. (e.g. "2gb")
+  image:
     description:
-     - This is the slug of the image you would like the droplet created with.
-  region_id:
+     - This is the image you would like the droplet created with (e.g. "ubuntu-14-04-x64").
+  region:
     description:
-     - This is the slug of the region you would like your server to be created in.
+     - This is the region you would like your server to be created in (e.g. "ams2").
   ssh_key_ids:
     description:
      - Optional, array of of SSH key (numeric) ID that you would like to be added to the server.
@@ -103,9 +103,9 @@ EXAMPLES = '''
     state: present
     name: mydroplet
     api_token: XXX
-    size_id: 2gb
-    region_id: ams2
-    image_id: fedora-19-x64
+    size: 2gb
+    region: ams2
+    image: fedora-19-x64
     wait_timeout: 500
 
   register: my_droplet
@@ -123,9 +123,9 @@ EXAMPLES = '''
     id: 123
     name: mydroplet
     api_token: XXX
-    size_id: 2gb
-    region_id: ams2
-    image_id: fedora-19-x64
+    size: 2gb
+    region: ams2
+    image: fedora-19-x64
     wait_timeout: 500
 
 # Create a droplet with ssh key
@@ -138,13 +138,14 @@ EXAMPLES = '''
     ssh_key_ids: 123,456
     name: mydroplet
     api_token: XXX
-    size_id: 2gb
-    region_id: ams2
-    image_id: fedora-19-x64
+    size: 2gb
+    region: ams2
+    image: fedora-19-x64
 
 '''
 
 import os
+import q
 import time
 
 
@@ -161,10 +162,57 @@ class JsonfyMixIn(object):
         return self.__dict__
 
 
+class Response(object):
+
+    def __init__(self, resp, info):
+        self.body = None
+        if resp:
+            self.body = resp.read()
+        self.info = info
+
+    @property
+    def json(self):
+        if not self.body:
+            # In some error cases fetch_url reads the body and places it in the info!
+            if "body" in self.info:
+                return json.loads(self.info["body"])
+            return None
+        try:
+            return json.loads(self.body)
+        except ValueError as e:
+            return None
+
+    @property
+    def status_code(self):
+        return self.info["status"]
+
+
+class Rest(object):
+
+    def __init__(self, module, api_token):
+        self.module = module
+        self.headers = {'Authorization': 'Bearer {}'.format(api_token), 'Content-type': 'application/json'}
+        self.baseurl = 'https://api.digitalocean.com/v2'
+
+    def _url_builder(self, path):
+        if path[0] == '/':
+            path = path[1:]
+        return '%s/%s' % (self.baseurl, path)
+
+    def send(self, method, path, data=None, headers=None):
+        url = self._url_builder(path)
+        data = self.module.jsonify(data)
+
+        resp, info = fetch_url(self.module, url, data=data, headers=self.headers, method=method)
+        return Response(resp, info)
+
+
 class Droplet(JsonfyMixIn):
-    manager = None
+    module = None
+    api_token = None
 
     def __init__(self, droplet_json):
+        q("__init__", droplet_json)
         self.status = 'new'
         self.__dict__.update(droplet_json)
 
@@ -176,13 +224,69 @@ class Droplet(JsonfyMixIn):
             for k, v in attrs.iteritems():
                 setattr(self, k, v)
         else:
-            json = self.manager.show_droplet(self.id)
+            json = Droplet._show_droplet(self.id)
+            q("x", json)
             if json['ip_address']:
                 self.update_attr(json)
 
+    @classmethod
+    def _populate_droplet_ips(cls, droplet):
+        droplet[u'ip_address'] = ''
+        for networkIndex in range(len(droplet['networks']['v4'])):
+            network = droplet['networks']['v4'][networkIndex]
+            if network['type'] == 'public':
+                droplet[u'ip_address'] = network['ip_address']
+            if network['type'] == 'private':
+                droplet[u'private_ip_address'] = network['ip_address']
+
+    @classmethod
+    def _show_droplet(cls, id):
+        rest = Rest(cls.module, cls.api_token)
+        response = rest.send("GET", "/droplets/%s".format(id))
+        # TODO: error handling
+        droplet = response.json["droplet"]
+        q("show", droplet)
+        Droplet._populate_droplet_ips(droplet)
+        q("show", droplet['ip_address'])
+        return droplet
+
+
+    # @classmethod
+    # def _new_droplet(cls, name, size, image, region, ssh_key_ids, virtio,
+    #                  private_networking_lower, backups_enabled_lower, user_data):
+    #     rest = Rest(cls.module, cls.api_token)
+    #     data = {"name": name, "size": size, "image": image, "region": region,
+    #             "ssh_key_ids": ssh_key_ids, "virtio": virtio,
+    #             "private_networking_lower": private_networking_lower,
+    #             "backups_enabled_lower": backups_enabled_lower, "user_data": user_data}
+
+    #     response = rest.send("POST", '/droplets', data=data)
+    #     if "droplet" not in response.json:
+    #         return response.
+    #     return response.json["droplet"]
+
+    @classmethod
+    def _power_on_droplet(cls, id):
+        pass
+
+    @classmethod
+    def _destroy_droplet(cls, id):
+        pass
+
+    @classmethod
+    def _all_active_droplets(cls):
+        rest = Rest(cls.module, cls.api_token)
+        response = rest.send("GET", "/droplets?per_page=2")
+        # TODO: error handling
+        if "droplets" in response.json:
+            q(response.json["droplets"])
+            if "links" in response.json:
+                print("LINKS:", response.json["links"])
+        return response.json["droplets"]
+
     def power_on(self):
         assert self.status == 'off', 'Can only power on a closed one.'
-        json = self.manager.power_on_droplet(self.id)
+        json = Droplet._power_on_droplet(self.id)
         self.update_attr(json)
 
     def ensure_powered_on(self, wait=True, wait_timeout=300):
@@ -203,21 +307,28 @@ class Droplet(JsonfyMixIn):
             raise TimeoutError('Wait for droplet running timeout', self.id)
 
     def destroy(self):
-        return self.manager.destroy_droplet(self.id, scrub_data=True)
+        return Droplet._destroy_droplet(self.id, scrub_data=True)
 
     @classmethod
-    def setup(cls, api_token):
-        cls.manager = DoManager(None, api_token, api_version=2)
+    def setup(cls, module, api_token):
+        cls.module = module
+        cls.api_token = api_token
 
     @classmethod
-    def add(cls, name, size_id, image_id, region_id, ssh_key_ids=None, virtio=True, private_networking=False,
+    def add(cls, name, size, image, region, ssh_key_ids=None, virtio=True, private_networking=False,
             backups_enabled=False, user_data=None):
-        private_networking_lower = str(private_networking).lower()
-        backups_enabled_lower = str(backups_enabled).lower()
-        json = cls.manager.new_droplet(name, size_id, image_id, region_id, ssh_key_ids,
-                                       virtio, private_networking_lower, backups_enabled_lower, user_data)
-        droplet = cls(json)
-        return droplet
+
+        rest = Rest(cls.module, cls.api_token)
+        data = {"name": name, "size": size, "image": image, "region": region,
+                "ssh_key_ids": ssh_key_ids, "virtio": virtio,
+                "private_networking_lower": str(private_networking).lower(),
+                "backups_enabled_lower": str(backups_enabled).lower(), 
+                "user_data": user_data}
+
+        response = rest.send("POST", '/droplets', data=data)
+        if "droplet" not in response.json:
+            pass # TODO
+        return response.json["droplet"]
 
     @classmethod
     def find(cls, id=None, name=None):
@@ -240,7 +351,7 @@ class Droplet(JsonfyMixIn):
 
     @classmethod
     def list_all(cls):
-        json = cls.manager.all_active_droplets()
+        json = cls._all_active_droplets()
         return map(cls, json)
 
 
@@ -259,7 +370,7 @@ def core(module):
     changed = True
     state = module.params['state']
 
-    Droplet.setup(api_token)
+    Droplet.setup(module, api_token)
     if state in ('active', 'present'):
 
         # First, try to find a droplet by id.
@@ -275,9 +386,9 @@ def core(module):
         if not droplet:
             droplet = Droplet.add(
                 name=getkeyordie('name'),
-                size_id=getkeyordie('size_id'),
-                image_id=getkeyordie('image_id'),
-                region_id=getkeyordie('region_id'),
+                size=getkeyordie('size'),
+                image=getkeyordie('image'),
+                region=getkeyordie('region'),
                 ssh_key_ids=module.params['ssh_key_ids'],
                 virtio=module.params['virtio'],
                 private_networking=module.params['private_networking'],
@@ -310,17 +421,21 @@ def core(module):
 
         event_json = droplet.destroy()
         module.exit_json(changed=True)
+    elif state in ('debug'):
+        x = Droplet._all_active_droplets()
+        q(x)
+        module.exit_json(changed=True, response=x)
 
 
 def main():
     module = AnsibleModule(
         argument_spec=dict(
-            state=dict(choices=['active', 'present', 'absent', 'deleted'], default='present'),
+            state=dict(choices=['active', 'present', 'absent', 'deleted', 'debug'], default='present'),
             api_token=dict(aliases=['API_TOKEN'], no_log=True),
             name=dict(type='str'),
-            size_id=dict(),
-            image_id=dict(),
-            region_id=dict(),
+            size=dict(aliases=['size_id']),
+            image=dict(aliases=['image_id']),
+            region=dict(aliases=['region_id']),
             ssh_key_ids=dict(type='list'),
             virtio=dict(type='bool', default='yes'),
             private_networking=dict(type='bool', default='no'),
@@ -332,7 +447,7 @@ def main():
             wait_timeout=dict(default=300, type='int'),
         ),
         required_together=(
-            ['size_id', 'image_id', 'region_id'],
+            ['size', 'image', 'region'],
         ),
         required_one_of=(
             ['id', 'name'],
@@ -343,8 +458,6 @@ def main():
         core(module)
     except TimeoutError as e:
         module.fail_json(msg=str(e), id=e.id)
-    except (DoError, Exception) as e:
-        module.fail_json(msg=str(e))
 
 # import module snippets
 from ansible.module_utils.basic import *

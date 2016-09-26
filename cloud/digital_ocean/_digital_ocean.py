@@ -173,6 +173,8 @@ EXAMPLES = '''
 
 import os
 import time
+import q
+
 from distutils.version import LooseVersion
 
 HAS_DOPY = True
@@ -271,6 +273,7 @@ class Droplet(JsonfyMixIn):
     @classmethod
     def list_all(cls):
         json = cls.manager.all_active_droplets()
+        q(json.__str__())
         return map(cls, json)
 
 class SSH(JsonfyMixIn):
@@ -317,7 +320,7 @@ def core(module):
 
     try:
         api_token = module.params['api_token'] or os.environ['DO_API_TOKEN'] or os.environ['DO_API_KEY']
-    except KeyError as e:
+    except KeyError, e:
         module.fail_json(msg='Unable to load %s' % e.message)
 
     changed = True
@@ -325,6 +328,7 @@ def core(module):
     state = module.params['state']
 
     if command == 'droplet':
+
         Droplet.setup(api_token)
         if state in ('active', 'present'):
 
@@ -376,6 +380,8 @@ def core(module):
 
             event_json = droplet.destroy()
             module.exit_json(changed=True)
+        elif state in ('debug'):
+            module.exit_json(changed=True, response=Droplet.list_all())
 
     elif command == 'ssh':
         SSH.setup(api_token)
@@ -399,7 +405,7 @@ def main():
     module = AnsibleModule(
         argument_spec = dict(
             command = dict(choices=['droplet', 'ssh'], default='droplet'),
-            state = dict(choices=['active', 'present', 'absent', 'deleted'], default='present'),
+            state = dict(choices=['active', 'present', 'absent', 'deleted', 'debug'], default='present'),
             api_token = dict(aliases=['API_TOKEN'], no_log=True),
             name = dict(type='str'),
             size_id = dict(),
@@ -433,9 +439,9 @@ def main():
 
     try:
         core(module)
-    except TimeoutError as e:
+    except TimeoutError, e:
         module.fail_json(msg=str(e), id=e.id)
-    except (DoError, Exception) as e:
+    except (DoError, Exception), e:
         module.fail_json(msg=str(e))
 
 # import module snippets
